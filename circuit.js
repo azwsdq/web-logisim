@@ -1,4 +1,4 @@
-import { TYPES, isSignal } from './components.js';
+import { TYPES, isSignal, VARIABLE_GATES, MAX_INPUTS, MIN_INPUTS, inputPins } from './components.js';
 export const DOCUMENT_VERSION = 1;
 export const LIMITS = { nodes: 1000, wires: 5000, points: 1000, coordinate: 1e6 };
 // Tuples avoid collisions when imported IDs contain punctuation.
@@ -16,6 +16,11 @@ function isPoint(point) {
 function validateNodes(nodes) {
   const byId = new Map();
   for (const node of nodes) {
+    // A gate input count is optional; documents without it stay two-input gates.
+    if (node?.inputs !== undefined && !(VARIABLE_GATES.includes(node.type) &&
+      Number.isInteger(node.inputs) && node.inputs >= MIN_INPUTS && node.inputs <= MAX_INPUTS)) {
+      throw new Error('Некорректное число входов');
+    }
     if (!node || typeof node.id !== 'string' || byId.has(node.id) ||
       !Object.hasOwn(TYPES, node.type) || !isPoint(node) ||
       typeof node.label !== 'string' || ![0, 1].includes(node.value)) {
@@ -35,7 +40,7 @@ function validateWires(wires, nodes) {
     if (!wire || typeof wire.id !== 'string' || ids.has(wire.id) ||
       !source || !target ||
       !TYPES[source.type].outputs.includes(wire.from.pin) ||
-      !TYPES[target.type].inputs.includes(wire.to.pin) || occupiedPins.has(destination)) {
+      !inputPins(target).includes(wire.to.pin) || occupiedPins.has(destination)) {
       throw new Error('Некорректное соединение');
     }
     if (wire.points !== undefined && (!Array.isArray(wire.points) ||

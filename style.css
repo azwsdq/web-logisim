@@ -507,6 +507,9 @@ main {
 #preview {
   pointer-events:none
 }
+#marquee {
+  pointer-events:none
+}
 footer {
   height:27px;
   display:flex;

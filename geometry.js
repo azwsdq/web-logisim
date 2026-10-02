@@ -1,13 +1,18 @@
-import { TYPES } from './components.js';
+import { VARIABLE_GATES, inputCount, inputPins } from './components.js';
 import { pinKey } from './circuit.js';
 export const GRID = 10;
 export const snap = value => Math.round(value / GRID) * GRID;
+export const INPUT_SPACING = 20;
 export function localPin(node, pin, output = false) {
   if (output) {
     return { x: 80, y: 30 };
   }
-  const inputs = TYPES[node.type].inputs;
-  return { x: 0, y: inputs.length === 1 ? 30 : pin === inputs[0] ? 20 : 40 };
+  const inputs = inputPins(node);
+  const index = inputs.indexOf(pin);
+  if (index < 0) {
+    return { x: 0, y: 30 };
+  }
+  return { x: 0, y: 30 + (index - (inputs.length - 1) / 2) * INPUT_SPACING };
 }
 export function pinPoint(nodes, reference, output = false) {
   const node = nodes instanceof Map ? nodes.get(reference.node) : nodes.find(node => node.id === reference.node);
@@ -27,6 +32,72 @@ export function route(source, target, points = []) {
     point.x !== vertices[index - 1].x || point.y !== vertices[index - 1].y);
 }
 export const pathFor = points => points.map((point, index) => `${index ? 'L' : 'M'}${point.x} ${point.y}`).join(' ');
+// The body span drives the symbol and the frame selection box that the renderer
+// highlights, so hit tests match the drawing. Two inputs keep the original
+// -22..72 frame; taller gates grow upwards together with their body.
+export const LABEL_OFFSET = 14;
+export function bodySpan(node) {
+  const half = VARIABLE_GATES.includes(node.type) ? (inputCount(node) - 1) * INPUT_SPACING / 2 + 15 : 25;
+  return { top: 30 - half, bottom: 30 + half };
+}
+export function nodeBox(node) {
+  const { top, bottom } = bodySpan(node);
+  const y = Math.min(-22, top - LABEL_OFFSET - 9);
+  return { x: -8, y, width: 96, height: bottom + 17 - y };
+}
+export const nodeBounds = node => {
+  const box = nodeBox(node);
+  return { x: node.x + box.x, y: node.y + box.y, width: box.width, height: box.height };
+};
+export const marqueeBox = (start, end) => ({
+  x: Math.min(start.x, end.x),
+  y: Math.min(start.y, end.y),
+  width: Math.abs(end.x - start.x),
+  height: Math.abs(end.y - start.y),
+});
+export function touchesBox(box, rect) {
+  return box.x <= rect.x + rect.width && rect.x <= box.x + box.width &&
+    box.y <= rect.y + rect.height && rect.y <= box.y + box.height;
+}
+// Liang-Barsky clip: the segment counts as touched when it enters or crosses the box.
+export function segmentTouchesBox(box, start, end) {
+  const dx = end.x - start.x, dy = end.y - start.y;
+  let enter = 0, leave = 1;
+  for (const [p, q] of [[-dx, start.x - box.x], [dx, box.x + box.width - start.x],
+    [-dy, start.y - box.y], [dy, box.y + box.height - start.y]]) {
+    if (p === 0) {
+      if (q < 0) {
+        return false;
+      }
+      continue;
+    }
+    const t = q / p;
+    if (p < 0) {
+      enter = Math.max(enter, t);
+    }
+    else {
+      leave = Math.min(leave, t);
+    }
+  }
+  return enter <= leave;
+}
+// A wire is picked up when any route segment meets the frame, not only its ends.
+export function itemsInBox(model, box) {
+  const nodes = new Map(model.nodes.map(node => [node.id, node]));
+  const ids = [];
+  for (const node of model.nodes) {
+    if (touchesBox(box, nodeBounds(node))) {
+      ids.push(node.id);
+    }
+  }
+  for (const wire of model.wires) {
+    const path = route(pinPoint(nodes, wire.from, true), pinPoint(nodes, wire.to), wire.points);
+    if (path.some((point, index) => index > 0 && segmentTouchesBox(box, path[index - 1], point))) {
+      ids.push(wire.id);
+    }
+  }
+  return ids;
+}
 export function nearestPoint(points, target) {
   let nearest = { distance: Infinity, index: 0, point: points[0] };
   for (let index = 1; index < points.length; index++) {

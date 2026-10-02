@@ -1,3 +1,5 @@
+import { nodeBounds } from '../geometry.js';
+
 const MIN_ZOOM = 0.15;
 const MAX_ZOOM = 4;
 export class Viewport {
@@ -50,14 +52,16 @@ export class Viewport {
       maxX = Math.max(maxX, point.x);
       maxY = Math.max(maxY, point.y);
     }
-    model.nodes.forEach(include);
+    // Component boxes, not origins: a gate body reaches far below its origin.
+    model.nodes.forEach(node => include(nodeBounds(node)));
     for (const wire of model.wires) {
       wire.points?.forEach(include);
     }
-    minX -= 30;
-    minY -= 35;
-    maxX += 110;
-    maxY += 90;
+    const margin = 22;
+    minX -= margin;
+    minY -= margin;
+    maxX += margin;
+    maxY += margin;
     this.zoom = Math.max(MIN_ZOOM, Math.min(1.25, (bounds.width - 60) / (maxX - minX), (bounds.height - 60) / (maxY - minY)));
     this.offset = {
       x: (bounds.width - (maxX - minX) * this.zoom) / 2 - minX * this.zoom,

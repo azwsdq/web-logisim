@@ -1,4 +1,5 @@
 import { TYPES, simulate } from '../simulator.js';
+import { VARIABLE_GATES, inputCount, inputPins, MAX_INPUTS, MIN_INPUTS } from '../components.js';
 import { toDocument, fromDocument } from '../circuit.js';
 import { History } from './history.js';
 import { loadDocument, saveDocument, readDocument, downloadDocument } from './storage.js';
@@ -6,14 +7,14 @@ import { Viewport } from './viewport.js';
 import { createRenderer } from './renderer.js';
 import { createElementCache } from './dom.js';
 import { createRenderScheduler } from './render-scheduler.js';
-import { snap, pinPoint, route, pathFor, nearestPoint } from '../geometry.js';
+import { snap, pinPoint, route, pathFor, nearestPoint, marqueeBox, itemsInBox } from '../geometry.js';
 import { halfAdder, rsLatch } from '../examples.js';
 export function startEditor() {
   const $ = createElementCache();
   const uid = () => crypto.randomUUID();
   let model;
   let values = {};
-  let selected = null;
+  let selected = new Set();
   let tool = 'select';
   let placing = null;
   let pending = null;
@@ -26,7 +27,7 @@ export function startEditor() {
   let toastTimer;
   const canvas = $('#canvas');
   const viewport = new Viewport(canvas, $('#viewport'), $('#grid'), $('#zoom-reset'));
-  const renderer = createRenderer(() => ({ model, values, selected, placing, paused, result, canUndo: history.canUndo, canRedo: history.canRedo }));
+  const renderer = createRenderer(() => ({ model, values, selected, primary: primary(), placing, paused, result, canUndo: history.canUndo, canRedo: history.canRedo }));
   const renderFrame = createRenderScheduler(render);
   const point = event => viewport.point(event);
   const fit = () => viewport.fit(model);
@@ -44,6 +45,14 @@ export function startEditor() {
   }
   const pin = (ref, out = false) => pinPoint(model.nodes, ref, out);
   const wireRoute = wire => route(pin(wire.from, true), pin(wire.to), wire.points);
+  // Selection holds node and wire ids; single-item panels follow the primary one.
+  const primary = () => (selected.size === 1 ? [...selected][0] : null);
+  function select(...ids) {
+    selected = new Set(ids.filter(id => id != null));
+  }
+  function selectAll() {
+    select(...model.nodes.map(node => node.id), ...model.wires.map(wire => wire.id));
+  }
   function notify(message) {
     $('#toast').textContent = message;
     $('#toast').style.display = 'block';
@@ -88,7 +97,7 @@ export function startEditor() {
       button.classList.toggle('active', name === tool);
       button.setAttribute('aria-pressed', String(name === tool));
     }
-    $('#tool-hint').textContent = { select: 'Выбор: перемещение элементов и проводов. Двойной щелчок по входу — 0 / 1.', poke: 'Входы: нажмите на входной контакт, чтобы переключить 0 / 1.', wire: 'Провод: пин → углы на поле → пин. Нажмите на провод для ответвления.', pan: 'Обзор: перетаскивайте поле. Колесо — масштаб.' }[tool];
+    $('#tool-hint').textContent = { select: 'Выбор: перемещение элементов и рамка выделения по пустому месту. Двойной щелчок по входу — 0 / 1.', poke: 'Входы: нажмите на входной контакт, чтобы переключить 0 / 1.', wire: 'Провод: пин → углы на поле → пин. Нажмите на провод для ответвления.', pan: 'Обзор: перетаскивайте поле. Колесо — масштаб.' }[tool];
     library($('#search').value);
     renderProperties();
   }
@@ -99,6 +108,17 @@ export function startEditor() {
     const points = pending.points || [];
     const routePoints = pending.ref.direction === 'out' ? route(pin(pending.ref, true), position, points) : route(pin(pending.ref), position, points);
     $('#preview').setAttribute('d', pathFor(routePoints));
+  }
+  function drawMarquee(box) {
+    const frame = $('#marquee');
+    frame.setAttribute('x', box.x);
+    frame.setAttribute('y', box.y);
+    frame.setAttribute('width', box.width);
+    frame.setAttribute('height', box.height);
+    frame.style.display = 'block';
+  }
+  function hideMarquee() {
+    $('#marquee').style.display = 'none';
   }
   function toggle(id) {
     const node = model.nodes.find(node => node.id === id);
@@ -125,7 +145,7 @@ export function startEditor() {
     model.wires = model.wires.filter(wire => wire.id !== editing && !(wire.to.node === to.node && wire.to.pin === to.pin));
     const wire = { id: editing || uid(), from: { node: from.node, pin: from.pin }, to: { node: to.node, pin: to.pin }, ...(points?.length ? { points } : {}) };
     model.wires.push(wire);
-    selected = wire.id;
+    select(wire.id);
     cancel();
     commit();
   }
@@ -139,7 +159,7 @@ export function startEditor() {
     const type = placing;
     const node = { id: uid(), type, x: snap(position.x - 40), y: snap(position.y - 30), label: TYPES[type].name, value: 0 };
     model.nodes.push(node);
-    selected = node.id;
+    select(node.id);
     if (!repeat) {
       setTool('select');
     }
@@ -169,9 +189,12 @@ export function startEditor() {
     const wireElement = event.target.closest('[data-wire]');
     const ref = refAt(event.target);
     if (tool === 'poke') {
-      selected = nodeElement?.dataset.id || null;
-      if (selected) {
-        toggle(selected);
+      if (nodeElement) {
+        select(nodeElement.dataset.id);
+        toggle(nodeElement.dataset.id);
+      }
+      else {
+        select();
       }
       render();
       return;
@@ -199,18 +222,46 @@ export function startEditor() {
       const path = wireRoute(wire);
       const nearest = nearestPoint(path, position);
       pending = { ref: { ...wire.from, direction: 'out' }, points: [...path.slice(1, nearest.index), nearest.point] };
-      selected = wire.id;
+      select(wire.id);
       drawPreview(position);
       render();
       return;
     }
-    selected = nodeElement?.dataset.id || wireElement?.dataset.wire || null;
-    if (nodeElement) {
-      const node = model.nodes.find(node => node.id === selected);
+    const hit = nodeElement?.dataset.id || wireElement?.dataset.wire || null;
+    if (hit && event.shiftKey) {
+      if (selected.has(hit)) {
+        selected.delete(hit);
+      }
+      else {
+        selected.add(hit);
+      }
+      render();
+      return;
+    }
+    if (!hit) {
+      // Left button on empty canvas: frame selection, or a plain click that clears it.
+      if (tool === 'select') {
+        drag = { marquee: true, x: position.x, y: position.y, base: [...selected], additive: event.shiftKey, moved: false };
+        drag.pointerId = event.pointerId;
+        canvas.setPointerCapture(event.pointerId);
+        return;
+      }
+      select();
+      render();
+      return;
+    }
+    if (!selected.has(hit)) {
+      select(hit);
+    }
+    if (selected.size > 1) {
+      drag = startGroupDrag(position);
+    }
+    else if (nodeElement) {
+      const node = model.nodes.find(node => node.id === hit);
       drag = { node: node.id, x: position.x, y: position.y, start: { x: node.x, y: node.y }, saved: false };
     }
     else if (wireElement) {
-      const wire = model.wires.find(wire => wire.id === selected);
+      const wire = model.wires.find(wire => wire.id === hit);
       const handle = wireElement.dataset.handle;
       drag = { wire: wire.id, x: position.x, y: position.y, saved: false, index: handle === undefined ? null : Number(handle), start: handle === undefined ? position : (wire.points?.[Number(handle)] || { x: snap((pin(wire.from, true).x + pin(wire.to).x) / 2), y: snap((pin(wire.from, true).y + pin(wire.to).y) / 2) }) };
     }
@@ -221,6 +272,24 @@ export function startEditor() {
     render();
   }
   canvas.addEventListener('pointerdown', handlePointerDown);
+  // A group drag keeps the shape of the selection: chosen nodes move, and control
+  // points of chosen wires (and of wires inside the group) follow the same offset.
+  function startGroupDrag(position) {
+    const group = new Set(selected);
+    const origins = { nodes: [], points: [] };
+    for (const node of model.nodes) {
+      if (group.has(node.id)) {
+        origins.nodes.push({ node, x: node.x, y: node.y });
+      }
+    }
+    for (const wire of model.wires) {
+      if (!group.has(wire.id) && !(group.has(wire.from.node) && group.has(wire.to.node))) {
+        continue;
+      }
+      wire.points?.forEach((point, index) => origins.points.push({ wire, index, x: point.x, y: point.y }));
+    }
+    return { group: true, saved: false, x: position.x, y: position.y, origins };
+  }
   function insertRoutePoint(wire, position) {
     let last = pin(wire.from, true);
     let best = Infinity;
@@ -255,6 +324,18 @@ export function startEditor() {
       viewport.update();
       return;
     }
+    if (drag.marquee) {
+      if (!drag.moved && Math.hypot(position.x - drag.x, position.y - drag.y) * viewport.zoom < 4) {
+        return;
+      }
+      drag.moved = true;
+      const box = marqueeBox({ x: drag.x, y: drag.y }, position);
+      drawMarquee(box);
+      const hits = itemsInBox(model, box);
+      selected = drag.additive ? new Set([...drag.base, ...hits]) : new Set(hits);
+      renderFrame.schedule();
+      return;
+    }
     if (!drag.saved && Math.hypot(position.x - drag.x, position.y - drag.y) * viewport.zoom < 4) {
       return;
     }
@@ -262,7 +343,17 @@ export function startEditor() {
       checkpoint();
       drag.saved = true;
     }
-    if (drag.wire) {
+    if (drag.group) {
+      const dx = position.x - drag.x, dy = position.y - drag.y;
+      for (const item of drag.origins.nodes) {
+        item.node.x = snap(item.x + dx);
+        item.node.y = snap(item.y + dy);
+      }
+      for (const item of drag.origins.points) {
+        item.wire.points[item.index] = { x: snap(item.x + dx), y: snap(item.y + dy) };
+      }
+    }
+    else if (drag.wire) {
       const wire = model.wires.find(wire => wire.id === drag.wire);
       wire.points ??= [];
       if (drag.index === null) {
@@ -281,6 +372,14 @@ export function startEditor() {
   function endDrag(event) {
     const pointerId = event?.pointerId ?? drag?.pointerId;
     renderFrame.flush();
+    if (drag?.marquee) {
+      hideMarquee();
+      // A cancelled frame restores the previous selection; a finished one keeps the hits.
+      if (!drag.moved || event?.type !== 'pointerup') {
+        selected = new Set(drag.additive ? drag.base : []);
+      }
+      render();
+    }
     if (drag?.connection && event && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 5) {
       const ref = refAt(document.elementFromPoint(event.clientX, event.clientY));
       if (ref && pending && ref.direction !== pending.ref.direction) {
@@ -339,7 +438,7 @@ export function startEditor() {
     }
     setTool('select');
     placing = type;
-    selected = null;
+    select();
     canvas.dataset.tool = 'place';
     $('#tool-hint').textContent = `${TYPES[type].name}: нажмите на поле для размещения. Shift — несколько. Escape — отмена.`;
     library($('#search').value);
@@ -353,11 +452,12 @@ export function startEditor() {
     }
   });
   $('#properties').addEventListener('click', event => {
+    const id = primary();
     if (event.target.id === 'toggle-selected') {
-      toggle(selected);
+      toggle(id);
     }
     if (event.target.id === 'reset-wire') {
-      const wire = model.wires.find(wire => wire.id === selected);
+      const wire = model.wires.find(wire => wire.id === id);
       if (wire?.points?.length) {
         checkpoint();
         delete wire.points;
@@ -365,17 +465,52 @@ export function startEditor() {
       }
     }
     if (event.target.id === 'reconnect-wire') {
-      const wire = model.wires.find(wire => wire.id === selected);
+      const wire = model.wires.find(wire => wire.id === id);
       setTool('wire');
       pending = { ref: { ...wire.from, direction: 'out' }, points: structuredClone(wire.points || []), editing: wire.id };
       notify('Выберите новый вход. Escape — оставить прежнее соединение.');
     }
   });
+  // Fewer inputs means fewer pins, so wires on the removed pins have to go:
+  // otherwise the document would no longer validate.
+  function setInputCount(input) {
+    const node = model.nodes.find(node => node.id === primary());
+    const requested = Math.trunc(input.valueAsNumber);
+    if (!node || !VARIABLE_GATES.includes(node.type) || !Number.isFinite(requested)) {
+      renderProperties();
+      return;
+    }
+    const count = Math.min(MAX_INPUTS, Math.max(MIN_INPUTS, requested));
+    if (count === inputCount(node)) {
+      renderProperties();
+      return;
+    }
+    checkpoint();
+    if (count === TYPES[node.type].inputs.length) {
+      delete node.inputs;
+    }
+    else {
+      node.inputs = count;
+    }
+    const pins = new Set(inputPins(node));
+    const kept = model.wires.filter(wire => !(wire.to.node === node.id && !pins.has(wire.to.pin)));
+    const dropped = model.wires.length - kept.length;
+    model.wires = kept;
+    select(node.id);
+    commit(true);
+    if (dropped) {
+      notify(`Входов: ${count}. Провода к лишним входам удалены.`);
+    }
+  }
   $('#properties').addEventListener('change', event => {
+    if (event.target.id === 'input-count') {
+      setInputCount(event.target);
+      return;
+    }
     if (event.target.id !== 'label') {
       return;
     }
-    const node = model.nodes.find(node => node.id === selected);
+    const node = model.nodes.find(node => node.id === primary());
     if (!node) {
       return;
     }
@@ -390,13 +525,13 @@ export function startEditor() {
     commit(false);
   });
   function remove() {
-    if (!selected) {
+    if (!selected.size) {
       return;
     }
     checkpoint();
-    model.nodes = model.nodes.filter(node => node.id !== selected);
-    model.wires = model.wires.filter(wire => wire.id !== selected && wire.from.node !== selected && wire.to.node !== selected);
-    selected = null;
+    model.nodes = model.nodes.filter(node => !selected.has(node.id));
+    model.wires = model.wires.filter(wire => !selected.has(wire.id) && !selected.has(wire.from.node) && !selected.has(wire.to.node));
+    select();
     cancel();
     commit();
   }
@@ -408,7 +543,7 @@ export function startEditor() {
     }
     model = restored.model;
     values = restored.values;
-    selected = null;
+    select();
     cancel();
     $('#project-name').value = model.name;
     commit();
@@ -442,7 +577,7 @@ export function startEditor() {
     ({ model, values } = fromDocument(data));
     paused = false;
     $('#pause').textContent = 'Ⅱ';
-    selected = null;
+    select();
     setTool('select');
     $('#project-name').value = model.name;
     commit();
@@ -504,7 +639,7 @@ export function startEditor() {
     if (event.key === 'Escape') {
       endDrag();
       setTool('select');
-      selected = null;
+      select();
       render();
     }
     if (drag) {
@@ -522,6 +657,11 @@ export function startEditor() {
     if (modifier && event.key.toLowerCase() === 's') {
       event.preventDefault();
       $('#export').click();
+    }
+    if (modifier && !event.altKey && event.key.toLowerCase() === 'a') {
+      event.preventDefault();
+      selectAll();
+      render();
     }
     if (modifier && event.altKey && event.key.toLowerCase() === 'n') {
       event.preventDefault();

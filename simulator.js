@@ -1,4 +1,4 @@
-import { TYPES, isSignal } from './components.js';
+import { isSignal, inputPins } from './components.js';
 import { pinKey } from './circuit.js';
 // Preserve the original public imports for existing consumers.
 export { TYPES } from './components.js';
@@ -6,26 +6,27 @@ export { validate } from './circuit.js';
 const isBit = value => value === 0 || value === 1;
 const invert = value => isBit(value) ? 1 - value : 'X';
 export function evaluate(type, inputs, value = 0) {
-  const [first, second] = inputs;
+  const [first] = inputs;
   switch (type) {
     case 'INPUT': return value;
     case 'OUTPUT': return first;
     case 'AND':
     case 'NAND': {
-      const result = first === 0 || second === 0 ? 0 : first === 1 && second === 1 ? 1 : 'X';
+      // A controlling zero wins over floating or unknown inputs.
+      const result = inputs.some(input => input === 0) ? 0 : inputs.every(input => input === 1) ? 1 : 'X';
       return type === 'NAND' ? invert(result) : result;
     }
     case 'OR':
     case 'NOR': {
-      const result = first === 1 || second === 1 ? 1 : first === 0 && second === 0 ? 0 : 'X';
+      const result = inputs.some(input => input === 1) ? 1 : inputs.every(input => input === 0) ? 0 : 'X';
       return type === 'NOR' ? invert(result) : result;
     }
-    case 'XOR': return isBit(first) && isBit(second) ? first ^ second : 'X';
+    case 'XOR': return inputs.every(isBit) ? inputs.reduce((sum, input) => sum ^ input, 0) : 'X';
     case 'NOT': return invert(first);
     case 'NMOS':
     case 'PMOS': {
       const enabled = type === 'NMOS' ? 1 : 0;
-      return first === enabled ? second : isBit(first) ? 'Z' : 'X';
+      return first === enabled ? inputs[1] : isBit(first) ? 'Z' : 'X';
     }
     default: return 'X';
   }
@@ -33,7 +34,7 @@ export function evaluate(type, inputs, value = 0) {
 function compileInputs(nodes, wires) {
   const indices = new Map(nodes.map((node, index) => [node.id, index]));
   const drivers = new Map(wires.map(wire => [pinKey(wire.to.node, wire.to.pin), indices.get(wire.from.node)]));
-  return nodes.map(node => TYPES[node.type].inputs.map(pin => drivers.get(pinKey(node.id, pin))));
+  return nodes.map(node => inputPins(node).map(pin => drivers.get(pinKey(node.id, pin))));
 }
 function changedSignals(states, current) {
   return new Set(current.flatMap((value, index) => states.some(state => state[index] !== value) ? [index] : []));

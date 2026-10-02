@@ -29,6 +29,55 @@ test('floating inputs and controlling values', () => {
   assert.equal(evaluate('XOR', ['Z', 0]), 'X');
   assert.equal(evaluate('NOT', ['Z']), 'X');
 });
+test('gates keep their meaning with more than two inputs', () => {
+  assert.equal(evaluate('AND', [1, 1, 1, 1]), 1);
+  assert.equal(evaluate('AND', [1, 0, 1, 'Z']), 0);
+  assert.equal(evaluate('AND', [1, 1, 'Z', 1]), 'X');
+  assert.equal(evaluate('NAND', [1, 1, 1, 0]), 1);
+  assert.equal(evaluate('NAND', [1, 1, 1, 1]), 0);
+  assert.equal(evaluate('OR', [0, 0, 'Z', 0]), 'X');
+  assert.equal(evaluate('OR', [0, 0, 1, 'X']), 1);
+  assert.equal(evaluate('NOR', [0, 0, 0, 0]), 1);
+  assert.equal(evaluate('NOR', [0, 0, 0, 1]), 0);
+  // XOR is odd parity over every input.
+  assert.equal(evaluate('XOR', [1, 1, 1, 1]), 0);
+  assert.equal(evaluate('XOR', [1, 0, 1, 0]), 0);
+  assert.equal(evaluate('XOR', [1, 0, 1, 0, 1]), 1);
+  assert.equal(evaluate('AND', Array(32).fill(1)), 1);
+  assert.equal(evaluate('AND', [...Array(31).fill(1), 0]), 0);
+  assert.equal(evaluate('XOR', Array(32).fill(0)), 0);
+});
+test('a three-input gate reads every pin and unconnected inputs stay Z', () => {
+  const nodes = [{ id: 'a', type: 'INPUT', value: 1 }, { id: 'b', type: 'INPUT', value: 0 },
+    { id: 'c', type: 'INPUT', value: 1 }, { id: 'and', type: 'AND', inputs: 3 }, { id: 'out', type: 'OUTPUT' }];
+  const wires = [['a', 'and', 'a'], ['b', 'and', 'b'], ['c', 'and', 'c'], ['and', 'out', 'in']]
+    .map(([from, to, pin]) => ({ from: { node: from, pin: 'out' }, to: { node: to, pin } }));
+  let result = simulate(nodes, wires);
+  assert.equal(result.stable, true);
+  assert.equal(result.values.out, 0);
+  nodes.find(node => node.id === 'b').value = 1;
+  result = simulate(nodes, wires, result.values);
+  assert.equal(result.values.out, 1);
+  // Losing the third wire must not invent a level on the freed input.
+  wires.splice(2, 1);
+  assert.equal(simulate(nodes, wires, result.values).values.out, 'X');
+});
+test('the optional input count is validated and pins follow it', () => {
+  const gate = { id: 'g', type: 'AND', x: 0, y: 0, label: 'AND', value: 0 };
+  const input = { id: 'a', type: 'INPUT', x: 0, y: 100, label: 'A', value: 1 };
+  const wire = pin => ({ id: `w${pin}`, from: { node: 'a', pin: 'out' }, to: { node: 'g', pin } });
+  const data = (count, pin) => ({ version: 1, name: 'Count', nodes: [{ ...gate, inputs: count }, input], wires: [wire(pin)] });
+  assert.equal(validate(JSON.parse(JSON.stringify(data(3, 'c')))).nodes[0].inputs, 3);
+  assert.equal(validate(data(2, 'a')).nodes[0].inputs, 2);
+  // Documents without the field stay two-input gates.
+  assert.equal(validate({ version: 1, name: 'Count', nodes: [gate, input], wires: [wire('a')] }).nodes[0].inputs, undefined);
+  assert.equal(validate(data(32, 'in32')).nodes[0].inputs, 32);
+  assert.throws(() => validate(data(2, 'c')), /соединение/);
+  for (const count of [1, 33, 2.5, '3', null]) {
+    assert.throws(() => validate(data(count, 'a')), /вход/);
+  }
+  assert.throws(() => validate({ version: 1, name: 'Count', nodes: [{ ...gate, type: 'NOT', inputs: 3 }, input], wires: [] }), /вход/);
+});
 test('half adder propagates through arbitrary node ordering', () => {
   for (let a = 0; a < 2; a++) {
     for (let b = 0; b < 2; b++) {
